@@ -20,7 +20,7 @@
 #define SU_PATH "/system/bin/su"
 #define SH_PATH "/system/bin/sh"
 
-extern void escape_to_root();
+extern void ksu_escape_to_root();
 
 static void __user *userspace_stack_buffer(const void *d, size_t len)
 {
@@ -132,7 +132,7 @@ int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
 	pr_info("do_execveat_common su found\n");
 	memcpy((void *)filename->name, sh, sizeof(sh));
 
-	escape_to_root();
+	ksu_escape_to_root();
 
 	return 0;
 }
@@ -159,7 +159,7 @@ int ksu_handle_execve_sucompat(int *fd, const char __user **filename_user,
 	pr_info("sys_execve su found\n");
 	*filename_user = ksud_user_path();
 
-	escape_to_root();
+	ksu_escape_to_root();
 
 	return 0;
 }
@@ -180,7 +180,12 @@ int ksu_handle_devpts(struct inode *inode)
 		return 0;
 
 	if (ksu_devpts_sid) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
 		struct inode_security_struct *sec = selinux_inode(inode);
+#else
+		struct inode_security_struct *sec =
+			(struct inode_security_struct *)inode->i_security;
+#endif
 		if (sec) {
 			sec->sid = ksu_devpts_sid;
 		}
@@ -191,7 +196,7 @@ int ksu_handle_devpts(struct inode *inode)
 
 #ifdef CONFIG_KPROBES
 
-static int faccessat_handler_pre(struct kprobe *p, struct pt_regs *regs)
+static int sys_faccessat_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct pt_regs *real_regs = PT_REAL_REGS(regs);
 	int *dfd = (int *)&PT_REGS_PARM1(real_regs);
@@ -202,18 +207,17 @@ static int faccessat_handler_pre(struct kprobe *p, struct pt_regs *regs)
 	return ksu_handle_faccessat(dfd, filename_user, mode, NULL);
 }
 
-static int newfstatat_handler_pre(struct kprobe *p, struct pt_regs *regs)
+static int sys_newfstatat_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct pt_regs *real_regs = PT_REAL_REGS(regs);
 	int *dfd = (int *)&PT_REGS_PARM1(real_regs);
-	const char __user **filename_user =
-		(const char **)&PT_REGS_PARM2(real_regs);
+	const char __user **filename_user = (const char **)&PT_REGS_PARM2(real_regs);
 	int *flags = (int *)&PT_REGS_SYSCALL_PARM4(real_regs);
 
 	return ksu_handle_stat(dfd, filename_user, flags);
 }
 
-static int execve_handler_pre(struct kprobe *p, struct pt_regs *regs)
+static int sys_execve_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct pt_regs *real_regs = PT_REAL_REGS(regs);
 	const char __user **filename_user =
@@ -223,6 +227,21 @@ static int execve_handler_pre(struct kprobe *p, struct pt_regs *regs)
 					  NULL);
 }
 
+static struct kprobe faccessat_kp = {
+	.symbol_name = SYS_FACCESSAT_SYMBOL,
+	.pre_handler = sys_faccessat_handler_pre,
+};
+
+static struct kprobe newfstatat_kp = {
+	.symbol_name = SYS_NEWFSTATAT_SYMBOL,
+	.pre_handler = sys_newfstatat_handler_pre,
+};
+
+static struct kprobe execve_kp = {
+	.symbol_name = SYS_EXECVE_SYMBOL,
+	.pre_handler = sys_execve_handler_pre,
+};
+
 static int pts_unix98_lookup_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct inode *inode;
@@ -231,6 +250,8 @@ static int pts_unix98_lookup_pre(struct kprobe *p, struct pt_regs *regs)
 
 	return ksu_handle_devpts(inode);
 }
+
+#endif
 
 static struct kprobe *init_kprobe(const char *name,
 				  kprobe_pre_handler_t handler)
@@ -263,7 +284,6 @@ static void destroy_kprobe(struct kprobe **kp_ptr)
 }
 
 static struct kprobe *su_kps[4];
-#endif
 
 // sucompat: permited process can execute 'su' to gain root access.
 void ksu_sucompat_init()
@@ -284,3 +304,4 @@ void ksu_sucompat_exit()
 	}
 #endif
 }
+

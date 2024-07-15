@@ -48,6 +48,16 @@ void ksu_android_ns_fs_check()
 	task_unlock(current);
 }
 
+int ksu_access_ok(const void *addr, unsigned long size) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+    /* For kernels before 5.0.0, pass the type argument to access_ok. */
+    return access_ok(VERIFY_READ, addr, size);
+#else
+    /* For kernels 5.0.0 and later, ignore the type argument. */
+    return access_ok(addr, size);
+#endif
+}
+
 struct file *ksu_filp_open_compat(const char *filename, int flags, umode_t mode)
 {
 	// switch mnt_ns even if current is not wq_worker, to ensure what we open is the correct file in android mnt_ns, rather than user created mnt_ns
@@ -81,8 +91,42 @@ ssize_t ksu_kernel_write_compat(struct file *p, const void *buf, size_t count,
 	return kernel_write(p, buf, count, pos);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0) || defined(KSU_STRNCPY_FROM_USER_NOFAULT)
 long ksu_strncpy_from_user_nofault(char *dst, const void __user *unsafe_addr,
 				   long count)
 {
 	return strncpy_from_user_nofault(dst, unsafe_addr, count);
 }
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 3, 0)
+long ksu_strncpy_from_user_nofault(char *dst, const void __user *unsafe_addr,
+				   long count)
+{
+	return strncpy_from_unsafe_user(dst, unsafe_addr, count);
+}
+#else
+// Copied from: https://elixir.bootlin.com/linux/v4.9.337/source/mm/maccess.c#L201
+long ksu_strncpy_from_user_nofault(char *dst, const void __user *unsafe_addr,
+				   long count)
+{
+	mm_segment_t old_fs = get_fs();
+	long ret;
+
+	if (unlikely(count <= 0))
+		return 0;
+
+	set_fs(USER_DS);
+	pagefault_disable();
+	ret = strncpy_from_user(dst, unsafe_addr, count);
+	pagefault_enable();
+	set_fs(old_fs);
+
+	if (ret >= count) {
+		ret = count;
+		dst[ret - 1] = '\0';
+	} else if (ret > 0) {
+		ret++;
+	}
+
+	return ret;
+}
+#endif
