@@ -140,4 +140,6 @@ kernel/configs/android-*.cfg
 # Tech package directories
 #techpack/
 out/
-build.sh
+build_munch.sh
+AnyKernel3
+logs
